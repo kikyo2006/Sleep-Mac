@@ -8,4 +8,5 @@ public enum Log {
     public static let timer = Logger(subsystem: "com.sleepmac.app", category: "timer")
     public static let sleep = Logger(subsystem: "com.sleepmac.app", category: "sleep")
     public static let idle = Logger(subsystem: "com.sleepmac.app", category: "idle")
+    public static let light = Logger(subsystem: "com.sleepmac.app", category: "light")
 }

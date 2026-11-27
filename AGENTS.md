@@ -19,7 +19,9 @@ A macOS menu bar app (`Sleep Mac`) with seven menu items:
 1. **Custom Commands…** opens a window listing the commands that run before sleep. Default commands are locked and cannot be removed. Custom commands are added with **+** (sheet: name, command, "run as administrator") and removed with **−** (confirmation dialog first).
 2. **Sleep** runs every command in order, makes sure nothing is still keeping the Mac awake, then runs `pmset sleepnow`.
 3. **Sleep Timer ▸** — presets (15 min, 30 min, 1 h, 2 h) or **At a Specific Time…** (hour:minute, next occurrence: today if still ahead, otherwise tomorrow). Choosing a new time replaces the old one; while a timer is set the submenu starts with "Sleeps at HH:MM (in …)" and **Cancel Timer**, the item title shows the time and the menu bar icon becomes `moon.zzz.fill`. When the time comes a floating panel counts down 30 s (**Cancel** is the default button, **Sleep Now** skips the wait); if nobody cancels, the same flow as **Sleep** runs.
-4. **Sleep When Lid Closes** (on by default, only shown on a Mac with a lid) — if the Mac is still awake 20 s after the lid closes, something is keeping it awake, so the Sleep flow runs unattended (no countdown, no question). One click toggles it; stored in user defaults key `sleepWhenLidCloses`.
+4. **Sleep When Lid Closes ▸** — **Off / Lid Sensor / Light Sensor**, one at a time (`LidSleepMode`; shown when the Mac has a lid or a built-in light sensor, and each choice only when its sensor exists). Stored in the two guards' own user defaults keys, kept mutually exclusive: `sleepWhenLidCloses` (on by default, so Lid Sensor is the default) and `sleepWhenDarkLid`. If both are on (settings saved before the submenu), Light Sensor wins and the lid key is turned off at launch.
+   - **Lid Sensor** — if the Mac is still awake 20 s after the lid closes, something is keeping it awake, so the Sleep flow runs unattended (no countdown, no question).
+   - **Light Sensor** — for a lid sensor that never reports a closed lid: the light sensor in the bezel reads near-total darkness with the lid shut, so 10 s of darkness (< 0.5 lux) with no keyboard/trackpad input runs the Sleep flow unattended. It can misfire in a pitch-dark room or with the sensor covered, so once the lid sensor works again the user should switch back to Lid Sensor.
 5. **Sleep When Idle ▸** (Off / 15 / 30 / 60 min, default 30; user defaults key `sleepWhenIdleMinutes`) — fallback that does not need the lid sensor: if nobody has used the keyboard/mouse/trackpad for that long and the Mac is still awake, the Sleep flow runs unattended. Added because this MacBook's lid close is never reported by macOS (no `Clamshell Sleep` in `pmset -g log`, `AppleClamshellState` stays `No` with the lid shut).
 6. **Launch at Login** — one click checks it, the next click unchecks it (`SMAppService.mainApp`). The checkmark mirrors the real system status and is refreshed in `validateMenuItem` each time the menu opens: on = enabled, dash = registered but waiting for the user's approval in System Settings, off = disabled. If approval is needed, an alert offers to open Login Items settings.
 7. **Quit Sleep Mac**.
@@ -40,6 +42,7 @@ Sources/SleepMacCore/   pure logic, no AppKit, unit-tested
  IdleSleepGuard.swift    idle fallback (CGEventSource idle time, display-assertion check, 2-check confirm)
   Log.swift               os.Logger channels (subsystem com.sleepmac.app)
   LidWatcher.swift        IOKit lid state + change notifications; LidSleepGuard (the 20 s rule)
+  LidSleepMode.swift      Off / Lid Sensor / Light Sensor choice, keeps the two guards exclusive
   SleepSchedule.swift     timer rules (decide, nextOccurrence, describe), SleepCountdown, SleepTimer
 Sources/SleepMac/       AppKit UI
   main.swift              entry point + developer flags (--dry-run, --ui-smoke-test)
@@ -79,7 +82,7 @@ Order of steps, defaults first, then custom commands in the order they were adde
 4. `Re-enable system sleep` (built-in) — if `pmset -g` shows `SleepDisabled 1`, run `pmset -a disablesleep 0` as administrator. The admin dialog only appears when it is actually needed.
 5. Custom commands.
 6. Wait 1.5 s, re-scan. If a CLI blocker remains, `disablesleep` is still on, or a custom command failed, show "Sleep Anyway / Cancel". Failures of default commands are silent on purpose (no simulator running is not a problem).
-7. `pmset sleepnow`.
+7. `pmset sleepnow`. It returns a few seconds before the Mac is actually asleep, so the app stays busy ("Preparing to sleep…", every trigger ignored) until the next wake, or for at most 30 s if the Mac never goes to sleep. Without that, a lid, light, idle or timer trigger in that gap would start Sleep a second time.
 
 ### Sleep timer
 
@@ -89,7 +92,7 @@ Order of steps, defaults first, then custom commands in the order they were adde
 - The timer never fires while Sleep is already running or a countdown is already on screen.
 - Tests and `--ui-smoke-test` give `SleepTimer` (and `LidSleepGuard`) a throw-away `UserDefaults` suite; never set or clear the user's real timer from a session.
 
-### Sleep When Lid Closes
+### Sleep When Lid Closes ▸ Lid Sensor
 
 - `IOKitLidStateSource` reads `AppleClamshellState` and `AppleClamshellCausesSleep` from `IOPMrootDomain` and listens for `kIOPMMessageClamshellStateChange` (`0xE0034100`; the C macro is not visible from Swift).
 - A closed lid only counts when `AppleClamshellCausesSleep` is true. With an external display and power it is false (clamshell mode, the user wants the Mac running) and nothing happens.
@@ -105,9 +108,18 @@ Order of steps, defaults first, then custom commands in the order they were adde
 - Fires once per idle period; it re-arms only after someone uses the Mac, so a Mac that refuses to sleep (`disablesleep` without an admin password) is not hammered.
 - It overrides "keep awake" assertions from apps such as Claude's Electron `NoIdleSleepAssertion`. That is intended: the user chose the idle limit.
 
+### Sleep When Lid Closes ▸ Light Sensor
+
+- Reads `AmbientBrightness` (16.16 fixed point, lux) from the built-in display's `AppleCLCD2` entry (the one without `external = Yes`). One property read per second, only while the setting is on; never shell out to `ioreg -l` for it.
+- Measured on this MacBook: lid shut ≈ 0.03 lux, dim room 1–7 lux. Threshold `darkLux = 0.5`.
+- Runs Sleep when it has been dark for `darkSeconds` (10 s) and there has been no input for at least that long. Any input resets it (a dark room, not a closed lid).
+- Ignores everything for `graceAfterWake` (60 s) after a wake or a launch: right after waking the sensor can still report the old dark value, and the third-party `lid_monitor.sh` script looped Sleep → wake → Sleep because of that.
+- Skips while a video player keeps the display on; `coreaudiod` is ignored so music playing with the lid shut does not keep the Mac awake.
+- Fires once per dark period, then stays quiet for `graceAfterWake` too: Sleep takes a few seconds and the reading flickers when the display turns off, which once started a second countdown. Covered by `DarkLidGuardTests` with a fake sensor and clock.
+
 ### Logs and App Nap
 
-- All lid, idle, timer and Sleep decisions go to the unified log: `/usr/bin/log show --last 1h --predicate 'subsystem == "com.sleepmac.app"'`. In zsh plain `log` is a builtin, so use the full path.
+- All lid, light, idle, timer and Sleep decisions go to the unified log: `/usr/bin/log show --last 1h --predicate 'subsystem == "com.sleepmac.app"'`. In zsh plain `log` is a builtin, so use the full path.
 - `Info.plist` sets `NSAppSleepDisabled` so App Nap never delays the timers while the display is off.
 
 ## Gotchas

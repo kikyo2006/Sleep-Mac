@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lidItem: NSMenuItem?
     private let idleGuard: IdleSleepGuard
     private var idleItem: NSMenuItem?
+    private let darkGuard: DarkLidGuard
     private var statusItem: NSStatusItem?
     private var sleepItem: NSMenuItem?
     private var timerItem: NSMenuItem?
@@ -29,11 +30,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     init(launchAtLogin: LaunchAtLogin = LaunchAtLogin(),
          sleepTimer: SleepTimer = SleepTimer(),
          lidGuard: LidSleepGuard = LidSleepGuard(),
-         idleGuard: IdleSleepGuard = IdleSleepGuard()) {
+         idleGuard: IdleSleepGuard = IdleSleepGuard(),
+         darkGuard: DarkLidGuard = DarkLidGuard()) {
         self.launchAtLogin = launchAtLogin
         self.sleepTimer = sleepTimer
         self.lidGuard = lidGuard
         self.idleGuard = idleGuard
+        self.darkGuard = darkGuard
         super.init()
     }
 
@@ -43,7 +46,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func toggleLaunchAtLoginForTesting() -> LaunchAtLogin.Outcome { launchAtLogin.toggle() }
     var timerItemForTesting: NSMenuItem? { timerItem }
     var lidItemForTesting: NSMenuItem? { lidItem }
-    func toggleLidForTesting() { toggleSleepWhenLidCloses() }
     var idleItemForTesting: NSMenuItem? { idleItem }
     var countdownForTesting: CountdownWindowController? { countdownController }
     func refreshTimerMenuForTesting() { if let menu = timerItem?.submenu { menuNeedsUpdate(menu) } }
@@ -92,11 +94,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
-        // Only on a Mac with a lid. The checkmark is refreshed in validateMenuItem.
-        if lidGuard.isAvailable {
-            let lid = NSMenuItem(title: "Sleep When Lid Closes", action: #selector(toggleSleepWhenLidCloses), keyEquivalent: "")
-            lid.target = self
-            lid.toolTip = "If the Mac is still awake \(Int(LidSleepGuard.defaultDelay)) seconds after you close the lid, something is keeping it awake: run Sleep."
+        // One way at a time to notice a closed lid. Only on a Mac with a lid or a built-in light sensor;
+        // checkmarks are refreshed in validateMenuItem.
+        let modes = LidSleepMode.allCases.filter {
+            switch $0 {
+            case .off: return true
+            case .lidSensor: return lidGuard.isAvailable
+            case .lightSensor: return darkGuard.isAvailable
+            }
+        }
+        if modes.count > 1 {
+            let lid = NSMenuItem(title: "Sleep When Lid Closes", action: nil, keyEquivalent: "")
+            let lidMenu = NSMenu(title: "Sleep When Lid Closes")
+            for mode in modes {
+                let choice = NSMenuItem(title: mode.title, action: #selector(lidModeChosen(_:)), keyEquivalent: "")
+                choice.target = self
+                choice.tag = mode.rawValue
+                switch mode {
+                case .off: break
+                case .lidSensor:
+                    choice.toolTip = "If the Mac is still awake \(Int(LidSleepGuard.defaultDelay)) seconds after you close the lid, something is keeping it awake: run Sleep."
+                case .lightSensor:
+                    choice.toolTip = "For a lid sensor that does not work: when the light sensor reads dark for \(Int(DarkLidGuard.darkSeconds)) seconds and nobody touches the Mac, run Sleep. Any input, a video playing, or the first minute after waking keeps it away."
+                }
+                lidMenu.addItem(choice)
+            }
+            if modes.contains(.lightSensor) {
+                lidMenu.addItem(.separator())
+                let note = NSMenuItem(title: "Use Light Sensor only if closing the lid does not put the Mac to sleep",
+                                      action: nil, keyEquivalent: "")
+                note.isEnabled = false
+                lidMenu.addItem(note)
+            }
+            lid.submenu = lidMenu
             menu.addItem(lid)
             lidItem = lid
         }
@@ -213,13 +243,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installLidGuard() {
         lidGuard.onTrigger = { [weak self] in self?.forceSleepUnattended() }
         lidGuard.start()
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self, selector: #selector(systemWillSleep), name: NSWorkspace.willSleepNotification, object: nil)
+        darkGuard.onTrigger = { [weak self] in self?.forceSleepUnattended() }
+        darkGuard.start()
+        // Settings saved before there was a single choice may have both on; keep only one.
+        if lidGuard.isEnabled && darkGuard.isEnabled { lidSleepMode = lidSleepMode }
+        let center = NSWorkspace.shared.notificationCenter
+        center.addObserver(self, selector: #selector(systemWillSleep), name: NSWorkspace.willSleepNotification, object: nil)
+        center.addObserver(self, selector: #selector(systemDidWake), name: NSWorkspace.didWakeNotification, object: nil)
     }
 
-    @objc private func systemWillSleep() { lidGuard.systemWillSleep() }
+    @objc private func systemWillSleep() {
+        lidGuard.systemWillSleep()
+        darkGuard.systemWillSleep()
+    }
 
-    @objc private func toggleSleepWhenLidCloses() { lidGuard.isEnabled.toggle() }
+    @objc private func systemDidWake() {
+        darkGuard.systemDidWake()
+        if settleWork != nil { endBusy() }   // the Sleep that was waiting for the Mac to go to sleep is done
+    }
+
+    /// The active "Sleep When Lid Closes" mode. Setting it turns on at most one of the two guards.
+    var lidSleepMode: LidSleepMode {
+        get { LidSleepMode.from(lidEnabled: lidGuard.isEnabled, lightEnabled: darkGuard.isEnabled) }
+        set {
+            lidGuard.isEnabled = newValue.enablesLidSensor
+            darkGuard.isEnabled = newValue.enablesLightSensor
+        }
+    }
+
+    @objc private func lidModeChosen(_ sender: NSMenuItem) {
+        if let mode = LidSleepMode(rawValue: sender.tag) { lidSleepMode = mode }
+    }
 
     @objc private func idleChoiceChosen(_ sender: NSMenuItem) { idleGuard.minutes = sender.tag }
 
@@ -339,8 +393,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             coordinator.sleepNow()
-            DispatchQueue.main.async { self?.setBusy(false) }
+            DispatchQueue.main.async { self?.holdBusyUntilAsleep() }
         }
+    }
+
+    /// `pmset sleepnow` returns before the Mac is actually asleep (a few seconds later). Stay busy until
+    /// it wakes up again, so a lid, light, idle or timer trigger in that gap cannot start Sleep a second
+    /// time. If the Mac never goes to sleep, give up after `sleepSettleTimeout`.
+    private static let sleepSettleTimeout: TimeInterval = 30
+    private var settleWork: DispatchWorkItem?
+
+    private func holdBusyUntilAsleep() {
+        settleWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            Log.sleep.notice("Still awake \(Int(Self.sleepSettleTimeout), privacy: .public) s after sleepnow")
+            self?.endBusy()
+        }
+        settleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.sleepSettleTimeout, execute: work)
+    }
+
+    private func endBusy() {
+        settleWork?.cancel()
+        settleWork = nil
+        setBusy(false)
     }
 
     private func confirmSleepAnyway(report: SleepReport) -> Bool {
@@ -399,8 +475,8 @@ extension AppDelegate: NSMenuItemValidation {
         if menuItem.action == #selector(idleChoiceChosen(_:)) {
             menuItem.state = menuItem.tag == idleGuard.minutes ? .on : .off
         }
-        if menuItem === lidItem {
-            menuItem.state = lidGuard.isEnabled ? .on : .off
+        if menuItem.action == #selector(lidModeChosen(_:)) {
+            menuItem.state = menuItem.tag == lidSleepMode.rawValue ? .on : .off
         }
         if menuItem === loginItem {
             switch launchAtLogin.status {

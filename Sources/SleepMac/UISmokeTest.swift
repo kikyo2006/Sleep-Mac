@@ -98,8 +98,10 @@ enum UISmokeTest {
         let lidSource = SmokeLidSource()
         let lidGuard = LidSleepGuard(source: lidSource, defaults: timerDefaults)
         let idleGuard = IdleSleepGuard(defaults: timerDefaults, idleSeconds: { 0 }, displayKeptOnBy: { [] })
+        // A fake light sensor; it reads bright, and input is recent, so nothing is ever triggered.
+        let darkGuard = DarkLidGuard(defaults: timerDefaults, lux: { 100 }, idleSeconds: { 0 }, displayKeptOnBy: { [] })
         let delegate = AppDelegate(launchAtLogin: LaunchAtLogin(service: fakeLogin), sleepTimer: sleepTimer,
-                                   lidGuard: lidGuard, idleGuard: idleGuard)
+                                   lidGuard: lidGuard, idleGuard: idleGuard, darkGuard: darkGuard)
         delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         let menu = delegate.statusMenuForTesting
         check(menu?.items.map { $0.title } == ["Custom Commands…", "Sleep", "Sleep Timer", "", "Sleep When Lid Closes", "Sleep When Idle", "Launch at Login", "", "Quit Sleep Mac"],
@@ -126,18 +128,29 @@ enum UISmokeTest {
             check(delegate.validateMenuItem(sleepItem) && sleepItem.title == "Sleep", "Sleep returns to normal afterwards")
         }
 
-        if let lidItem = delegate.lidItemForTesting {
-            _ = delegate.validateMenuItem(lidItem)
-            check(lidItem.state == .on, "Sleep When Lid Closes is on by default")
-            delegate.toggleLidForTesting()
-            _ = delegate.validateMenuItem(lidItem)
-            check(lidItem.state == .off && !lidGuard.isEnabled, "one click turns Sleep When Lid Closes off")
+        if let lidMenu = delegate.lidItemForTesting?.submenu {
+            let choices = lidMenu.items.filter { $0.action != nil }
+            func checked() -> [String] {
+                choices.forEach { _ = delegate.validateMenuItem($0) }
+                return choices.filter { $0.state == .on }.map { $0.title }
+            }
+            func choose(_ title: String) {
+                if let index = lidMenu.items.firstIndex(where: { $0.title == title }) { lidMenu.performActionForItem(at: index) }
+            }
+            check(choices.map { $0.title } == ["Off", "Lid Sensor", "Light Sensor"],
+                  "lid submenu offers Off, Lid Sensor and Light Sensor (got \(choices.map { $0.title }))")
+            check(checked() == ["Lid Sensor"], "Lid Sensor is checked by default")
+            choose("Off")
+            check(checked() == ["Off"] && !lidGuard.isEnabled && !darkGuard.isEnabled, "Off turns both off")
             lidSource.set(closed: true)
             check(!lidGuard.isWaiting, "a closed lid is ignored while it is off")
             lidSource.set(closed: false)
-            delegate.toggleLidForTesting()
-            _ = delegate.validateMenuItem(lidItem)
-            check(lidItem.state == .on, "the next click turns it back on")
+            choose("Light Sensor")
+            check(checked() == ["Light Sensor"] && darkGuard.isEnabled && !lidGuard.isEnabled,
+                  "Light Sensor turns the light sensor on and the lid sensor off")
+            choose("Lid Sensor")
+            check(checked() == ["Lid Sensor"] && lidGuard.isEnabled && !darkGuard.isEnabled,
+                  "Lid Sensor turns the lid sensor on and the light sensor off")
             lidSource.set(closed: true)
             check(lidGuard.isWaiting, "closing the lid starts the wait")
             lidSource.set(closed: false)
