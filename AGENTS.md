@@ -14,12 +14,15 @@ Read this file first in every new session, before touching code.
 
 ## What this is
 
-A macOS menu bar app (`Sleep Mac`) with four menu items:
+A macOS menu bar app (`Sleep Mac`) with seven menu items:
 
 1. **Custom Commands…** opens a window listing the commands that run before sleep. Default commands are locked and cannot be removed. Custom commands are added with **+** (sheet: name, command, "run as administrator") and removed with **−** (confirmation dialog first).
 2. **Sleep** runs every command in order, makes sure nothing is still keeping the Mac awake, then runs `pmset sleepnow`.
-3. **Launch at Login** — one click checks it, the next click unchecks it (`SMAppService.mainApp`). The checkmark mirrors the real system status and is refreshed in `validateMenuItem` each time the menu opens: on = enabled, dash = registered but waiting for the user's approval in System Settings, off = disabled. If approval is needed, an alert offers to open Login Items settings.
-4. **Quit Sleep Mac**.
+3. **Sleep Timer ▸** — presets (15 min, 30 min, 1 h, 2 h) or **At a Specific Time…** (hour:minute, next occurrence: today if still ahead, otherwise tomorrow). Choosing a new time replaces the old one; while a timer is set the submenu starts with "Sleeps at HH:MM (in …)" and **Cancel Timer**, the item title shows the time and the menu bar icon becomes `moon.zzz.fill`. When the time comes a floating panel counts down 30 s (**Cancel** is the default button, **Sleep Now** skips the wait); if nobody cancels, the same flow as **Sleep** runs.
+4. **Sleep When Lid Closes** (on by default, only shown on a Mac with a lid) — if the Mac is still awake 20 s after the lid closes, something is keeping it awake, so the Sleep flow runs unattended (no countdown, no question). One click toggles it; stored in user defaults key `sleepWhenLidCloses`.
+5. **Sleep When Idle ▸** (Off / 15 / 30 / 60 min, default 30; user defaults key `sleepWhenIdleMinutes`) — fallback that does not need the lid sensor: if nobody has used the keyboard/mouse/trackpad for that long and the Mac is still awake, the Sleep flow runs unattended. Added because this MacBook's lid close is never reported by macOS (no `Clamshell Sleep` in `pmset -g log`, `AppleClamshellState` stays `No` with the lid shut).
+6. **Launch at Login** — one click checks it, the next click unchecks it (`SMAppService.mainApp`). The checkmark mirrors the real system status and is refreshed in `validateMenuItem` each time the menu opens: on = enabled, dash = registered but waiting for the user's approval in System Settings, off = disabled. If approval is needed, an alert offers to open Login Items settings.
+7. **Quit Sleep Mac**.
 
 The app is `LSUIElement` (no Dock icon). Swift Package, AppKit, macOS 13+, no third-party dependencies, no Xcode project.
 
@@ -34,11 +37,17 @@ Sources/SleepMacCore/   pure logic, no AppKit, unit-tested
   AssertionScanner.swift  parses `pmset -g assertions`; SleepState; ProcessInspector
   SleepCoordinator.swift  the Sleep flow: run commands, stop CLI blockers, verify, sleepnow
   LaunchAtLogin.swift     LoginItemService protocol, SMAppService wrapper, toggle() logic
+ IdleSleepGuard.swift    idle fallback (CGEventSource idle time, display-assertion check, 2-check confirm)
+  Log.swift               os.Logger channels (subsystem com.sleepmac.app)
+  LidWatcher.swift        IOKit lid state + change notifications; LidSleepGuard (the 20 s rule)
+  SleepSchedule.swift     timer rules (decide, nextOccurrence, describe), SleepCountdown, SleepTimer
 Sources/SleepMac/       AppKit UI
   main.swift              entry point + developer flags (--dry-run, --ui-smoke-test)
   AppDelegate.swift       status item, menu, hidden main menu (Edit), Sleep action
   CommandsWindowController.swift   table with +/− buttons
   AddCommandSheetController.swift  "Add Command" sheet
+  TimePickerWindowController.swift "Sleep at a Specific Time" window
+  CountdownWindowController.swift  30-second "Mac will sleep in …" panel
   UISmokeTest.swift       headless UI checks + PNG snapshots
 Tests/SleepMacCoreTests/
 Resources/Info.plist      bundle metadata (LSUIElement, NSAppleEventsUsageDescription)
@@ -46,7 +55,7 @@ scripts/build_app.sh      tests → universal release build → .app → ad-hoc 
 scripts/make_icon.swift   generates Resources/AppIcon.icns (run by build_app.sh when missing)
 ```
 
-User data: `~/Library/Application Support/Sleep Mac/commands.json` (custom commands only; defaults live in code).
+User data: `~/Library/Application Support/Sleep Mac/commands.json` (custom commands only; defaults live in code). The pending sleep time is the `scheduledSleepDate` key in the app's user defaults.
 
 ## Commands
 
@@ -71,6 +80,35 @@ Order of steps, defaults first, then custom commands in the order they were adde
 5. Custom commands.
 6. Wait 1.5 s, re-scan. If a CLI blocker remains, `disablesleep` is still on, or a custom command failed, show "Sleep Anyway / Cancel". Failures of default commands are silent on purpose (no simulator running is not a problem).
 7. `pmset sleepnow`.
+
+### Sleep timer
+
+- `SleepTimer` stores the fire date in user defaults (survives a restart of the app) and arms a **wall-clock** `DispatchSourceTimer` (`schedule(wallDeadline:)`, `.strict`), because run-loop timers stop counting while the Mac sleeps and are delayed by App Nap. `AppDelegate` also calls `reevaluate()` after `NSWorkspace.didWakeNotification` and `NSSystemClockDidChange`.
+- A time that passed more than `SleepSchedule.missedGrace` (2 min) ago is **dropped, not fired**: if the Mac was already asleep at that time, someone who wakes it later must not see it go back to sleep.
+- After the 30 s countdown, Sleep runs **unattended**: the "Sleep Anyway / Cancel" question is skipped because nobody may be at the Mac (the countdown was the chance to cancel). The admin password dialog for `disablesleep` can still appear and times out if nobody answers.
+- The timer never fires while Sleep is already running or a countdown is already on screen.
+- Tests and `--ui-smoke-test` give `SleepTimer` (and `LidSleepGuard`) a throw-away `UserDefaults` suite; never set or clear the user's real timer from a session.
+
+### Sleep When Lid Closes
+
+- `IOKitLidStateSource` reads `AppleClamshellState` and `AppleClamshellCausesSleep` from `IOPMrootDomain` and listens for `kIOPMMessageClamshellStateChange` (`0xE0034100`; the C macro is not visible from Swift).
+- A closed lid only counts when `AppleClamshellCausesSleep` is true. With an external display and power it is false (clamshell mode, the user wants the Mac running) and nothing happens.
+- The 20 s wait uses `DispatchQueue.main.asyncAfter` (uptime), which stops while the Mac sleeps, so only awake time counts. It is cancelled when the lid opens, when the setting is turned off and on `NSWorkspace.willSleepNotification`. At the end the lid state is read again before Sleep runs.
+- Before sleeping it dismisses a sleep-timer countdown on screen, otherwise that countdown would sleep the Mac again right after it is woken.
+- Opening and closing a real lid cannot be tested from a session; the logic is covered by `LidSleepGuardTests` with a fake source.
+
+### Sleep When Idle
+
+- Checks every 60 s. Idle time comes from `CGEventSource.secondsSinceLastEventType(.combinedSessionState, …)`.
+- Skips while an app (not powerd, not a command-line tool) holds `PreventUserIdleDisplaySleep` / `NoDisplaySleepAssertion`: a video or presentation is playing.
+- Needs two positive checks no more than 90 s apart on the wall clock, so a ~45 s DarkWake (huge idle time, display off) never triggers it.
+- Fires once per idle period; it re-arms only after someone uses the Mac, so a Mac that refuses to sleep (`disablesleep` without an admin password) is not hammered.
+- It overrides "keep awake" assertions from apps such as Claude's Electron `NoIdleSleepAssertion`. That is intended: the user chose the idle limit.
+
+### Logs and App Nap
+
+- All lid, idle, timer and Sleep decisions go to the unified log: `/usr/bin/log show --last 1h --predicate 'subsystem == "com.sleepmac.app"'`. In zsh plain `log` is a builtin, so use the full path.
+- `Info.plist` sets `NSAppSleepDisabled` so App Nap never delays the timers while the display is off.
 
 ## Gotchas
 

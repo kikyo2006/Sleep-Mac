@@ -10,6 +10,9 @@ A tiny menu bar app that puts your Mac to sleep **for real**: it first stops eve
 | --- | --- |
 | **Custom Commands…** | Opens the list of commands that run before sleep. Default commands are locked; add your own with **+**, remove one with **−** (asks for confirmation). |
 | **Sleep** | Runs all commands in order, checks that nothing still holds a sleep assertion, then sleeps. |
+| **Sleep Timer** | Puts the Mac to sleep later: in 15 min, 30 min, 1 h, 2 h, or at a time you pick. When the time comes, a window counts down 30 seconds; press **Cancel** to stay awake, otherwise Sleep runs as if you chose it from the menu. While a timer is set, the menu shows the time and offers **Cancel Timer**, and the moon icon is filled in. |
+| **Sleep When Lid Closes** | On by default (MacBooks only). If the Mac is still awake 20 seconds after you close the lid, something is keeping it awake, so Sleep runs without asking. Ignored when an external display keeps the Mac running with the lid closed. Click to turn it off or on. |
+| **Sleep When Idle** | Off, 15, 30 (default) or 60 minutes. If nobody has used the keyboard, mouse or trackpad for that long and the Mac is still awake, Sleep runs without asking. A video or presentation that keeps the screen on is respected. Works even when the lid sensor does not report a closed lid. |
 | **Launch at Login** | Click once to check it (Sleep Mac starts when you log in), click again to uncheck it. If macOS asks for approval, the app opens System Settings → General → Login Items for you. |
 | **Quit Sleep Mac** | Quits the app. |
 
@@ -21,6 +24,8 @@ A tiny menu bar app that puts your Mac to sleep **for real**: it first stops eve
 4. Runs your custom commands.
 5. Re-checks. If something is still keeping the Mac awake it tells you and lets you choose **Sleep Anyway** or **Cancel**.
 6. Runs `pmset sleepnow`.
+
+A timer started by Sleep Timer skips the **Sleep Anyway** question in step 5, since nobody may be at the Mac. If the Mac was already asleep at the chosen time, the timer is dropped rather than putting it back to sleep after you wake it.
 
 Custom commands are plain shell commands run with `/bin/zsh -c`. Tick *Run as administrator* to run one as root through the standard macOS password dialog.
 

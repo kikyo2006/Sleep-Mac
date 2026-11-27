@@ -24,7 +24,9 @@
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
-    <key>LSUIElement</key>
+    <key>NSAppSleepDisabled</key>
+	<true/>
+	<key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
