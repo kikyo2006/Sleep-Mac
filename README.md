@@ -31,7 +31,7 @@ Custom commands are plain shell commands run with `/bin/zsh -c`. Tick *Run as ad
 
 ## Install
 
-Open `dist/Sleep-Mac.dmg` and drag **Sleep Mac** to Applications. The app is signed ad hoc, so on a different Mac use right-click → Open the first time.
+Download `Sleep-Mac.dmg` from the GitHub Releases page (or build it, see below: `dist/Sleep-Mac.dmg`) and drag **Sleep Mac** to Applications. The app is signed ad hoc, so on a different Mac use right-click → Open the first time.
 
 Install it in Applications **before** switching on *Launch at Login*: macOS remembers the app's location, so a copy running from `dist/` (which every build deletes) would leave a dead login item.
 
@@ -42,6 +42,15 @@ Requires Xcode 15+ command line tools.
 ```bash
 scripts/build_app.sh     # tests, universal release build, Sleep Mac.app, zip and dmg in dist/
 swift test               # unit tests only
+```
+
+### Releasing
+
+Push a version tag and the **Release** workflow (`.github/workflows/release.yml`) builds, tests and publishes a GitHub release with the dmg and zip. The tag sets the app version.
+
+```bash
+git tag v1.1.0
+git push origin v1.1.0
 ```
 
 Developer flags (safe to run, they change nothing on your system):

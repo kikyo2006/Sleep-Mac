@@ -56,6 +56,7 @@ Tests/SleepMacCoreTests/
 Resources/Info.plist      bundle metadata (LSUIElement, NSAppleEventsUsageDescription)
 scripts/build_app.sh      tests → universal release build → .app → ad-hoc sign → zip + dmg in dist/
 scripts/make_icon.swift   generates Resources/AppIcon.icns (run by build_app.sh when missing)
+.github/workflows/release.yml  on a `v*` tag: build_app.sh on macos-15, then a GitHub release with dmg + zip
 ```
 
 User data: `~/Library/Application Support/Sleep Mac/commands.json` (custom commands only; defaults live in code). The pending sleep time is the `scheduledSleepDate` key in the app's user defaults.
@@ -68,7 +69,10 @@ swift test                                    # unit tests (starts a real `caffe
 .build/debug/SleepMac --dry-run               # prints what Sleep would do, changes nothing
 .build/debug/SleepMac --ui-smoke-test <dir>   # headless UI checks, writes PNG snapshots to <dir>
 scripts/build_app.sh                          # final product in dist/ (Sleep Mac.app, zip, dmg)
+VERSION=1.1.0 BUILD_NUMBER=7 scripts/build_app.sh   # same, stamping the version into Info.plist
 ```
+
+Releases: pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`, which runs `build_app.sh` with `VERSION=X.Y.Z` and publishes a GitHub release (dmg + zip, generated notes). The repo is `kikyo2006/Sleep-Mac` (private). Only tag or push when the user asks; a release is published as soon as the tag lands.
 
 Both developer flags are safe to run on the user's machine. Open the PNGs with the Read tool to review layout, because screenshots of the live screen are not available.
 

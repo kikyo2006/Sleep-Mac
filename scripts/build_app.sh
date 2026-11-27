@@ -1,6 +1,7 @@
 #!/bin/bash
 # Builds "Sleep Mac.app" (universal arm64 + x86_64, ad-hoc signed) plus a zip and a dmg into dist/.
-# Usage: scripts/build_app.sh
+# Usage: scripts/build_app.sh                (version from Resources/Info.plist)
+#        VERSION=1.2.0 BUILD_NUMBER=7 scripts/build_app.sh
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -32,6 +33,13 @@ rm -rf "$DIST"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/$EXECUTABLE" "$APP/Contents/MacOS/$EXECUTABLE"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+# The release workflow passes the tag's version (VERSION=1.2.0) and a build number.
+if [ -n "${VERSION:-}" ]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
+fi
+if [ -n "${BUILD_NUMBER:-}" ]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP/Contents/Info.plist"
+fi
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
